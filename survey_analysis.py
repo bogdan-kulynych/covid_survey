@@ -17,10 +17,11 @@
 # %%
 import re
 
-import tqdm
+from tqdm import notebook as tqdm
 import attr
 import pandas as pd
 import numpy as np
+import seaborn as sns
 import geopy
 
 # %% [markdown]
@@ -34,23 +35,6 @@ df.head(3)
 
 # %% [markdown]
 # # Refine dataset
-
-# %%
-lifestyle_df = df.drop(
-    columns=[
-        "Avez-vous l'impression que les gens autour de vous respectent les mesures politiques prises ?",
-        "Quels sont les sentiments que vous avez éprouvés depuis le début du confinement ?",
-        "Que savez-vous sur le coronavirus ?",
-        "Horodateur",
-        "Avez-vous accès aux ressources suivantes ?",
-        "Utilisez-vous un masque et/ou des gants lorsque vous sortez ?",
-        "Décrivez ce que signifie pour vous un bon état de santé",
-        "Quand avez-vous passé votre dernier examen de santé ?",
-        "Avez-vous passé un test pour le coronavirus au cours des derniers mois ?",
-        "Savez-vous que, pendant la durée du confinement, la meilleure façon de recevoir une aide médicale est d'appeler votre médecin, de travailler avec lui via les médias sociaux ou par appel vidéo ?",
-        "Considérez-vous que vous êtes en bonne santé en ce moment ?",
-    ]
-)
 
 # %%
 translation_strings = {}
@@ -76,31 +60,35 @@ class Feature:
 
 @attr.s
 class CategoricalFeature(Feature):
+    astype = attr.ib(default=float)
+    
     def encode(self, df):
         drop_first = len(df[self.name].dropna().unique()) <= 2
         dummies = pd.get_dummies(
             df[self.name], drop_first=drop_first, prefix=self.name, prefix_sep="-"
         )
-        return dummies.rename(columns=process_col)
+        return dummies.astype(self.astype).rename(columns=process_col)
 
 
 @attr.s
 class OrdinalFeature(Feature):
     levels = attr.ib(default=None)
+    astype = attr.ib(default=float)
 
     def encode(self, df):
         renaming_dict = {
             name: ord for name, ord in zip(self.levels, range(len(self.levels)))
         }
-        return df[self.name].replace(renaming_dict)
+        return df[self.name].astype(str).replace(renaming_dict).astype(self.astype)
 
 
 @attr.s
 class MultiCatFeature(Feature):
     sep = attr.ib(default=", ")
+    astype = attr.ib(default=float)
 
     def encode(self, df):
-        dummies = df[self.name].str.get_dummies(sep=self.sep)
+        dummies = df[self.name].str.get_dummies(sep=self.sep).astype(self.astype)
         return dummies.rename(columns=process_col).rename(
             columns=lambda x: f"{self.name}-{x}"
         )
@@ -108,13 +96,18 @@ class MultiCatFeature(Feature):
 
 @attr.s
 class NumFeature(Feature):
+    max_val = attr.ib(default=np.inf)
+    astype = attr.ib(default=float)
+    
     def encode(self, df):
         def to_num(x):
-            num_str = re.sub("[^0-9]", "", str(x))
+            num_str = re.sub("[^.0-9]", "", str(x))
             if len(num_str) > 0:
-                return float(int(num_str))
+                val = float(num_str)
+                if val <= self.max_val:
+                    return val
 
-        return df[self.name].apply(to_num)
+        return df[self.name].apply(to_num).astype(self.astype)
 
 
 @attr.s
@@ -130,8 +123,21 @@ class CountryFeature(Feature):
 
 
 # %%
-for c, f in zip(lifestyle_df.columns, features):
-    print(f'_("{c}"): {f},')
+lifestyle_df = df.drop(
+    columns=[
+        "Avez-vous l'impression que les gens autour de vous respectent les mesures politiques prises ?",
+        "Quels sont les sentiments que vous avez éprouvés depuis le début du confinement ?",
+        "Que savez-vous sur le coronavirus ?",
+        "Horodateur",
+        "Avez-vous accès aux ressources suivantes ?",
+        "Utilisez-vous un masque et/ou des gants lorsque vous sortez ?",
+#         "Décrivez ce que signifie pour vous un bon état de santé",
+        "Quand avez-vous passé votre dernier examen de santé ?",
+        "Avez-vous passé un test pour le coronavirus au cours des derniers mois ?",
+        "Savez-vous que, pendant la durée du confinement, la meilleure façon de recevoir une aide médicale est d'appeler votre médecin, de travailler avec lui via les médias sociaux ou par appel vidéo ?",
+        "Considérez-vous que vous êtes en bonne santé en ce moment ?",
+    ]
+)
 
 # %%
 features = {
@@ -160,7 +166,7 @@ features = {
     _(
         "Au cours de la semaine dernière, avec combien de personnes avez-vous "
         "été en contact physique étroit (moins de 2 mètres, plus de 10 min), en dehors de votre foyer ?"
-    ): NumFeature(name="num_close_contact"),
+    ): NumFeature(name="num_close_contact", max_val=500),
     _("Avez-vous voyagé au cours du dernier mois ?"): CategoricalFeature(
         name="recent_travel"
     ),
@@ -219,6 +225,7 @@ features = {
             _("Tous les 3 jours environ"),
             _("Toutes les semaines"),
             _("Toutes les deux semaines"),
+            _("Très rarement"),
             _("Pas du tout"),
         ],
     ),
@@ -237,8 +244,6 @@ features = {
     ),
     _("Quel est votre âge ?"): NumFeature(name="age"),
     _("Quel est votre genre ?"): CategoricalFeature(name="gender"),
-    _("Dans quel ville vivez-vous ?"): CityFeature(name="city"),
-    _("Dans quel pays vivez-vous ?"): CountryFeature(name="country"),
     _("Quelle est votre profession ?"): CategoricalFeature(name="profession"),
     _(
         "Comment jugez-vous votre niveau d’exposition au coronavirus au travail ?"
@@ -266,12 +271,48 @@ for feature in features.values():
 processed_data = pd.concat(dfs, axis=1)
 processed_data
 
-# %%
-locations = []
+# %% [markdown]
+# Sanity check:
 
-for i, row in tqdm.tqdm_notebook(list(lifestyle_df[["city", "country"]].iterrows())):
-    location = str(row["city"]) + ", " + str(row["country"])
-    geocoder = geopy.geocoders.Nominatim(user_agent="pdm", timeout=10)
-    query_result = geocoder.geocode(location)
-    address = query_result.address if query_result is not None else None
-    locations.append(address)
+# %%
+for col in processed_data.columns:
+    print(col, processed_data[col].unique())
+
+# %%
+use_locations = False
+
+if use_locations:
+    locations = []
+    for i, row in tqdm.tqdm(list(lifestyle_df[["city", "country"]].iterrows())):
+        location = str(row["city"]) + ", " + str(row["country"])
+        geocoder = geopy.geocoders.Nominatim(user_agent="pdm", timeout=10)
+        query_result = geocoder.geocode(location)
+        address = query_result.address if query_result is not None else None
+        locations.append(address)
+
+# %% [markdown]
+# ## Some initial cluster analysis
+
+# %%
+import umap
+from matplotlib import pyplot as plt
+
+# %%
+clean_data = processed_data.dropna()
+data = clean_data.drop(columns=[
+#     "age",
+#     "gender-autre",
+#     "gender-f",
+#     "gender-m",
+])
+
+reducer = umap.UMAP(random_state=42, n_neighbors=3)
+embedding = reducer.fit_transform(data)
+
+fig, ax = plt.subplots(figsize=(12, 10))
+sns.scatterplot(
+    x=embedding[:, 0], y=embedding[:, 1], hue=clean_data.age,
+    ax=ax
+)
+plt.setp(ax, xticks=[], yticks=[])
+plt.show()
