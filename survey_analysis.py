@@ -295,23 +295,40 @@ if use_locations:
 
 # %%
 import umap
+import hdbscan
 from matplotlib import pyplot as plt
 
 # %%
 clean_data = processed_data.dropna()
 data = clean_data.drop(columns=[
-#     "age",
-#     "gender-autre",
-#     "gender-f",
-#     "gender-m",
+    "age",
+    "gender-autre",
+    "gender-f",
+    "gender-m",
 ])
 
-reducer = umap.UMAP(random_state=42, n_neighbors=3)
+reducer = umap.UMAP(random_state=1, n_neighbors=3, n_components=10)
 embedding = reducer.fit_transform(data)
 
 fig, ax = plt.subplots(figsize=(12, 10))
 sns.scatterplot(
     x=embedding[:, 0], y=embedding[:, 1], hue=clean_data.age,
+    ax=ax
+)
+plt.setp(ax, xticks=[], yticks=[])
+plt.show()
+
+# %%
+clusterer = hdbscan.HDBSCAN(
+    min_cluster_size=25,
+).fit(embedding)
+
+# %%
+fig, ax = plt.subplots(figsize=(12, 10))
+sns.scatterplot(
+    x=embedding[:, 0], y=embedding[:, 1],
+    hue=clusterer.probabilities_,
+    style=clusterer.labels_,
     ax=ax
 )
 plt.setp(ax, xticks=[], yticks=[])
