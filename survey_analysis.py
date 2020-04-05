@@ -22,7 +22,21 @@ import attr
 import pandas as pd
 import numpy as np
 import seaborn as sns
+import networkx as nx
 import geopy
+
+import umap
+import hdbscan
+from matplotlib import pyplot as plt
+from community import community_louvain
+
+from sklearn import preprocessing
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.decomposition import PCA
+from sklearn.utils import shuffle
+from sklearn.model_selection import train_test_split
 
 # %% [markdown]
 # # Load data
@@ -74,12 +88,16 @@ class CategoricalFeature(Feature):
 class OrdinalFeature(Feature):
     levels = attr.ib(default=None)
     astype = attr.ib(default=float)
+    normalize = attr.ib(default=True)
 
     def encode(self, df):
         renaming_dict = {
             name: ord for name, ord in zip(self.levels, range(len(self.levels)))
         }
-        return df[self.name].astype(str).replace(renaming_dict).astype(self.astype)
+        col = df[self.name].astype(str).replace(renaming_dict).astype(self.astype)
+        if self.normalize:
+            col = (col - col.mean()) / col.std()
+        return col
 
 
 @attr.s
@@ -98,6 +116,7 @@ class MultiCatFeature(Feature):
 class NumFeature(Feature):
     max_val = attr.ib(default=np.inf)
     astype = attr.ib(default=float)
+    normalize = attr.ib(default=True)
     
     def encode(self, df):
         def to_num(x):
@@ -106,9 +125,12 @@ class NumFeature(Feature):
                 val = float(num_str)
                 if val <= self.max_val:
                     return val
-
-        return df[self.name].apply(to_num).astype(self.astype)
-
+                
+        col = df[self.name].apply(to_num).astype(self.astype)
+        if self.normalize:
+            col = (col - col.mean()) / col.std()
+        return col
+    
 
 @attr.s
 class CityFeature(Feature):
@@ -271,6 +293,9 @@ for feature in features.values():
 processed_data = pd.concat(dfs, axis=1)
 processed_data
 
+# %%
+lifestyle_df.shared_room.unique()
+
 # %% [markdown]
 # Sanity check:
 
@@ -279,57 +304,197 @@ for col in processed_data.columns:
     print(col, processed_data[col].unique())
 
 # %%
-use_locations = False
+compute_locations = False
 
-if use_locations:
-    locations = []
-    for i, row in tqdm.tqdm(list(lifestyle_df[["city", "country"]].iterrows())):
-        location = str(row["city"]) + ", " + str(row["country"])
+if compute_locations:
+    locations, latitude, longitude = [], [], []
+    for i, row in tqdm.tqdm(list(lifestyle_df[["Dans quel ville vivez-vous ?", "Dans quel pays vivez-vous ?"]].iterrows())):
+        query = ''
+        if type(row["Dans quel ville vivez-vous ?"]) is str:
+            query += str(row["Dans quel ville vivez-vous ?"]) + ', '
+        if type(row["Dans quel pays vivez-vous ?"]) is str:
+            query += str(row["Dans quel pays vivez-vous ?"]) + ', '
+        
         geocoder = geopy.geocoders.Nominatim(user_agent="pdm", timeout=10)
-        query_result = geocoder.geocode(location)
+        query_result = geocoder.geocode(query)
         address = query_result.address if query_result is not None else None
         locations.append(address)
+        lat = query_result.latitude if query_result is not None else None
+        latitude.append(lat)
+        lon = query_result.latitude if query_result is not None else None
+        longitude.append(lon)
+        
+    df_location = pd.DataFrame({'location': locations, 'lat': latitude, 'lon': longitude})
+    df_location.to_csv('data/df_location.csv')
 
 # %% [markdown]
-# ## Some initial cluster analysis
+# ## Build social network and cluster communities
 
 # %%
-import umap
-import hdbscan
-from matplotlib import pyplot as plt
-
-# %%
-clean_data = processed_data.dropna()
-data = clean_data.drop(columns=[
-    "age",
-    "gender-autre",
-    "gender-f",
-    "gender-m",
-])
-
-reducer = umap.UMAP(random_state=1, n_neighbors=3, n_components=10)
-embedding = reducer.fit_transform(data)
-
-fig, ax = plt.subplots(figsize=(12, 10))
-sns.scatterplot(
-    x=embedding[:, 0], y=embedding[:, 1], hue=clean_data.age,
-    ax=ax
+clean_data = processed_data.drop(
+    columns=["gender-autre", "gender-m"],
 )
-plt.setp(ax, xticks=[], yticks=[])
-plt.show()
+matrix = np.zeros((len(clean_data), len(clean_data)))
+
+for i, row_i in tqdm.tqdm(list(clean_data.iterrows())):
+    for j, row_j in clean_data.iterrows():
+        if j > i:
+            score = np.sum((row_i.values == row_j.values))
+            matrix[i][j] = score
+            matrix[j][i] = score
 
 # %%
-clusterer = hdbscan.HDBSCAN(
-    min_cluster_size=25,
-).fit(embedding)
+np.min(matrix[matrix > 0]), np.max(matrix), np.mean(matrix[matrix > 0]), np.median(matrix[matrix > 0])
 
 # %%
-fig, ax = plt.subplots(figsize=(12, 10))
-sns.scatterplot(
-    x=embedding[:, 0], y=embedding[:, 1],
-    hue=clusterer.probabilities_,
-    style=clusterer.labels_,
-    ax=ax
-)
-plt.setp(ax, xticks=[], yticks=[])
-plt.show()
+# Normalisation
+processed_matrix = (matrix >= np.percentile(matrix[matrix > 0], 95)).astype('bool')
+
+# %%
+G = nx.from_numpy_matrix(processed_matrix)
+
+# %%
+print(nx.info(G))
+
+# %%
+nx.write_gexf(G, "social_graph.gexf")
+
+# %%
+partition = community_louvain.best_partition(G, random_state=0)
+
+# %%
+df_communities = clean_data.copy()
+df_communities['community'] = pd.Series(partition)
+
+# %%
+list_communities = df_communities['community'].value_counts()
+list_communities
+
+# %%
+new_df = df.copy()
+community = pd.Series(partition)
+new_df['community'] = pd.Series(partition)
+
+# %%
+community_renaming_dict = {}
+counter = 1
+for i, count in list_communities.iteritems():
+    if count <= 5:
+        community_renaming_dict[i] = -1
+    else:
+        community_renaming_dict[i] = counter
+        counter += 1
+
+# %%
+new_df.community = new_df.community.replace(community_renaming_dict)
+
+# %%
+new_df.community.value_counts()
+
+# %%
+new_df.to_excel('FR_Questionnaire_communities.xlsx')
+
+# %%
+saved_partition = partition
+
+# %% [markdown]
+# ## Analyse communities
+
+# %% [markdown]
+# ### Outliers
+
+# %%
+for isolated in list_communities[list_communities == 1].index:
+    individual = df[df_communities['community'] == isolated]
+    print(f'Individual {individual.index[0] + 2}')
+
+# %% [markdown]
+# ### Main communities
+
+# %%
+df_main_communities = df_communities.query("community != -1").dropna()
+df_main_communities.community.replace(community_renaming_dict, inplace=True)
+
+# %%
+X, y = shuffle(df_main_communities.drop(columns='community'), df_main_communities['community'], 
+               random_state=0)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+
+# %%
+clf = LinearDiscriminantAnalysis()
+clf.fit(X_train, y_train)
+clf.score(X_test, y_test)
+
+# %%
+clf = LogisticRegressionCV()
+clf.fit(X_train, y_train)
+print(clf.score(X_test, y_test))
+best_param = clf.C_.mean()
+
+# %%
+community_size = []
+for i in range(3):
+    community_size.append(np.sum((df_main_communities['community'] == i)))
+print('Random baseline:', np.max(community_size)/len(df_main_communities))
+
+# %%
+X, y = df_main_communities.drop(columns='community'), df_main_communities['community']
+
+clf = LinearDiscriminantAnalysis()
+clf.fit_transform(X, y)
+persona = clf.decision_function(df_main_communities.drop(columns='community'))
+
+# %%
+X, y = df_main_communities.drop(columns='community'), df_main_communities['community']
+
+clf = LogisticRegression(C=best_param)
+clf.fit(X, y)
+persona = clf.decision_function(df_main_communities.drop(columns='community'))
+
+# %%
+d = clf.decision_function(X)
+probabilities = np.exp(d) / np.sum(np.exp(d))
+
+# %% [markdown]
+# Most important features
+
+# %%
+for i, community in enumerate(clf.classes_):
+    idx = X.iloc[np.argmax(np.abs(probabilities[:, i]))].name + 2
+    if i == -1:
+        print(f'Typical outlier (-1): {idx}')
+    else:
+        print(f'Typical individual for community {community}: {idx}')
+        
+    for top_question in reversed(np.argsort(np.abs(clf.coef_[i,:]))[-10:]):
+        print('   Question:', X.columns[top_question])
+        print('   Effect size:', clf.coef_[i,:][top_question])
+        print()
+
+# %% [markdown]
+# Community demographics
+
+# %%
+data = df_communities.copy()
+data.community.replace(community_renaming_dict, inplace=True)
+data.city = lifestyle_df[_("Dans quel ville vivez-vous ?")]
+data.country = lifestyle_df["Dans quel pays vivez-vous ?"]
+
+for i, community in enumerate(list(clf.classes_) + ["Total"]):
+    if community != "Total":
+        community_data = data.query(f"community == {community}")
+    else:
+        community_data = data
+    age = community_data.age * lifestyle_df.age.std() + lifestyle_df.age.mean()
+    demographics = {
+        "community": community,
+        "age": age.mean(),
+        "age_std": age.std(),
+        "gender_prop_woman": community_data["gender-f"].mean(),
+    }
+    if i == 0:
+        print(",".join(demographics.keys()))
+    print(",".join([str(v) for v in demographics.values()]))
+
+# %%
+lifestyle_df.profession.unique()
