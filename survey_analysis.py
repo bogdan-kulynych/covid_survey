@@ -392,7 +392,7 @@ new_df.community = new_df.community.replace(community_renaming_dict)
 new_df.community.value_counts()
 
 # %%
-new_df.to_excel('FR_Questionnaire_communities.xlsx')
+new_df.to_excel('out/FR_Questionnaire_communities.xlsx')
 
 # %%
 saved_partition = partition
