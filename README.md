@@ -15,8 +15,8 @@ pip install -r requirements.txt
 
 ## Using the Notebooks
 
-[Jupytext](https://github.com/mwouts/jupytext) is an amazing tool to make Jupyter notebooks friends
-with git. Just follow the documentation to either install a Jupyter extension and pair the script,
+You can use [Jupytext](https://github.com/mwouts/jupytext) to make Jupyter notebooks friends
+with git. Follow Jupytext docs to either install a Jupyter extension and pair the script,
 or use manual conversion:
 
 ```
