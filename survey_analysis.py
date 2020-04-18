@@ -38,6 +38,8 @@ from sklearn.decomposition import PCA
 from sklearn.utils import shuffle
 from sklearn.model_selection import train_test_split
 
+from IPython.display import display
+
 # %% [markdown]
 # # Load data
 
@@ -47,8 +49,27 @@ df = pd.read_excel("data/FR-Questionnaire_francais.xlsx")
 # %%
 df.head(3)
 
+# %%
+raw_lifestyle_df = df.drop(
+    columns=[
+        "Avez-vous l'impression que les gens autour de vous respectent les mesures politiques prises ?",
+        "Quels sont les sentiments que vous avez éprouvés depuis le début du confinement ?",
+        "Que savez-vous sur le coronavirus ?",
+        "Horodateur",
+        "Avez-vous accès aux ressources suivantes ?",
+        "Utilisez-vous un masque et/ou des gants lorsque vous sortez ?",
+        "Quand avez-vous passé votre dernier examen de santé ?",
+        "Avez-vous passé un test pour le coronavirus au cours des derniers mois ?",
+        "Savez-vous que, pendant la durée du confinement, la meilleure façon de recevoir une aide médicale est d'appeler votre médecin, de travailler avec lui via les médias sociaux ou par appel vidéo ?",
+        "Considérez-vous que vous êtes en bonne santé en ce moment ?",
+    ]
+)
+
 # %% [markdown]
-# # Refine dataset
+# # Process dataset
+
+# %% [markdown]
+# Translation utility for potentially translating the strings to a different language.
 
 # %%
 translation_strings = {}
@@ -61,6 +82,9 @@ def _(s):
     else:
         return trans
 
+
+# %% [markdown]
+# Definitions of feature types present in the survey
 
 # %%
 def process_col(s):
@@ -75,7 +99,7 @@ class Feature:
 @attr.s
 class CategoricalFeature(Feature):
     astype = attr.ib(default=float)
-    
+
     def encode(self, df):
         drop_first = len(df[self.name].dropna().unique()) <= 2
         dummies = pd.get_dummies(
@@ -86,6 +110,10 @@ class CategoricalFeature(Feature):
 
 @attr.s
 class OrdinalFeature(Feature):
+    """
+    Categorical feature with order.
+    """
+
     levels = attr.ib(default=None)
     astype = attr.ib(default=float)
     normalize = attr.ib(default=True)
@@ -102,6 +130,10 @@ class OrdinalFeature(Feature):
 
 @attr.s
 class MultiCatFeature(Feature):
+    """
+    Multiple categories feature, written as a comma-separated string.
+    """
+
     sep = attr.ib(default=", ")
     astype = attr.ib(default=float)
 
@@ -114,10 +146,14 @@ class MultiCatFeature(Feature):
 
 @attr.s
 class NumFeature(Feature):
+    """
+    Numeric feature
+    """
+
     max_val = attr.ib(default=np.inf)
     astype = attr.ib(default=float)
     normalize = attr.ib(default=True)
-    
+
     def encode(self, df):
         def to_num(x):
             num_str = re.sub("[^.0-9]", "", str(x))
@@ -125,41 +161,15 @@ class NumFeature(Feature):
                 val = float(num_str)
                 if val <= self.max_val:
                     return val
-                
+
         col = df[self.name].apply(to_num).astype(self.astype)
         if self.normalize:
             col = (col - col.mean()) / col.std()
         return col
-    
-
-@attr.s
-class CityFeature(Feature):
-    def encode(self, df):
-        pass
 
 
-@attr.s
-class CountryFeature(Feature):
-    def encode(self, df):
-        pass
-
-
-# %%
-lifestyle_df = df.drop(
-    columns=[
-        "Avez-vous l'impression que les gens autour de vous respectent les mesures politiques prises ?",
-        "Quels sont les sentiments que vous avez éprouvés depuis le début du confinement ?",
-        "Que savez-vous sur le coronavirus ?",
-        "Horodateur",
-        "Avez-vous accès aux ressources suivantes ?",
-        "Utilisez-vous un masque et/ou des gants lorsque vous sortez ?",
-#         "Décrivez ce que signifie pour vous un bon état de santé",
-        "Quand avez-vous passé votre dernier examen de santé ?",
-        "Avez-vous passé un test pour le coronavirus au cours des derniers mois ?",
-        "Savez-vous que, pendant la durée du confinement, la meilleure façon de recevoir une aide médicale est d'appeler votre médecin, de travailler avec lui via les médias sociaux ou par appel vidéo ?",
-        "Considérez-vous que vous êtes en bonne santé en ce moment ?",
-    ]
-)
+# %% [markdown]
+# Features specifications: dictionary that maps raw column names to a feature definition object.
 
 # %%
 features = {
@@ -277,15 +287,15 @@ features = {
 }
 
 # %%
+dfs = []
+
+# Create a dataframe with short column names for convenience
 feature_names = [f.name for f in features.values()]
-lifestyle_df = lifestyle_df.rename(
+lifestyle_df = raw_lifestyle_df.rename(
     columns={old: new for old, new in zip(features.keys(), feature_names)}
 )
 
-# %%
-dfs = []
-from IPython.display import display
-
+# Encode features
 for feature in features.values():
     feature_df = feature.encode(lifestyle_df)
     dfs.append(feature_df)
@@ -293,28 +303,34 @@ for feature in features.values():
 processed_data = pd.concat(dfs, axis=1)
 processed_data
 
-# %%
-lifestyle_df.shared_room.unique()
-
 # %% [markdown]
-# Sanity check:
+# Sanity check. Looking at all the unique feature values to see if all of them make sense.
 
 # %%
 for col in processed_data.columns:
     print(col, processed_data[col].unique())
+
+# %% [markdown]
+# We use Nominatim to get canonical locations (in lat, lon) for the locations that respondents have typed in free form. Set `compute_locations` to `True` to run this computation.
 
 # %%
 compute_locations = False
 
 if compute_locations:
     locations, latitude, longitude = [], [], []
-    for i, row in tqdm.tqdm(list(lifestyle_df[["Dans quel ville vivez-vous ?", "Dans quel pays vivez-vous ?"]].iterrows())):
-        query = ''
+    for i, row in tqdm.tqdm(
+        list(
+            lifestyle_df[
+                ["Dans quel ville vivez-vous ?", "Dans quel pays vivez-vous ?"]
+            ].iterrows()
+        )
+    ):
+        query = ""
         if type(row["Dans quel ville vivez-vous ?"]) is str:
-            query += str(row["Dans quel ville vivez-vous ?"]) + ', '
+            query += str(row["Dans quel ville vivez-vous ?"]) + ", "
         if type(row["Dans quel pays vivez-vous ?"]) is str:
-            query += str(row["Dans quel pays vivez-vous ?"]) + ', '
-        
+            query += str(row["Dans quel pays vivez-vous ?"]) + ", "
+
         geocoder = geopy.geocoders.Nominatim(user_agent="pdm", timeout=10)
         query_result = geocoder.geocode(query)
         address = query_result.address if query_result is not None else None
@@ -323,17 +339,26 @@ if compute_locations:
         latitude.append(lat)
         lon = query_result.latitude if query_result is not None else None
         longitude.append(lon)
-        
-    df_location = pd.DataFrame({'location': locations, 'lat': latitude, 'lon': longitude})
-    df_location.to_csv('data/df_location.csv')
+
+    df_location = pd.DataFrame(
+        {"location": locations, "lat": latitude, "lon": longitude}
+    )
+    df_location.to_csv("data/df_location.csv")
 
 # %% [markdown]
 # ## Build social network and cluster communities
 
+# %% [markdown]
+# Empirically, we want to remove these two columns, because only one person self-reported themselves with the "other" gender, and this happened to skew the clustering quite a bit.
+
 # %%
-clean_data = processed_data.drop(
-    columns=["gender-autre", "gender-m"],
-)
+clean_data = processed_data.drop(columns=["gender-autre", "gender-m"],)
+
+# %% [markdown]
+# First step of the Louvain clustering algorithm is to create a feature similarity matrix. We use the number of exactly matching feature values as the similarity score here.
+
+# %%
+
 matrix = np.zeros((len(clean_data), len(clean_data)))
 
 for i, row_i in tqdm.tqdm(list(clean_data.iterrows())):
@@ -344,11 +369,13 @@ for i, row_i in tqdm.tqdm(list(clean_data.iterrows())):
             matrix[j][i] = score
 
 # %%
-np.min(matrix[matrix > 0]), np.max(matrix), np.mean(matrix[matrix > 0]), np.median(matrix[matrix > 0])
+np.min(matrix[matrix > 0]), np.max(matrix), np.mean(matrix[matrix > 0]), np.median(
+    matrix[matrix > 0]
+)
 
 # %%
 # Normalisation
-processed_matrix = (matrix >= np.percentile(matrix[matrix > 0], 95)).astype('bool')
+processed_matrix = (matrix >= np.percentile(matrix[matrix > 0], 95)).astype("bool")
 
 # %%
 G = nx.from_numpy_matrix(processed_matrix)
@@ -363,62 +390,77 @@ nx.write_gexf(G, "social_graph.gexf")
 partition = community_louvain.best_partition(G, random_state=0)
 
 # %%
-df_communities = clean_data.copy()
-df_communities['community'] = pd.Series(partition)
+communities_data = clean_data.copy()
+communities_data["community"] = pd.Series(partition)
+
+# %% [markdown]
+# This is the list of communities obtained using the Louvain clustering with their respective member counts.
 
 # %%
-list_communities = df_communities['community'].value_counts()
+list_communities = communities_data["community"].value_counts()
 list_communities
 
 # %%
-new_df = df.copy()
-community = pd.Series(partition)
-new_df['community'] = pd.Series(partition)
+community_annotated_raw_df = lifestyle_df.copy().assign(community=pd.Series(partition))
+
+# %% [markdown]
+# We decide to only take the communities that have more than 5 people, and rename them as 1, 2, 3, ... in the order of increasing size. All communities smaller or equal than the threshold get lumped into an "outlier" community -1.
 
 # %%
+COMMUNITY_SIZE_THRESHOLD = 5
+
 community_renaming_dict = {}
 counter = 1
 for i, count in list_communities.iteritems():
-    if count <= 5:
+    if count <= COMMUNITY_SIZE_THRESHOLD:
         community_renaming_dict[i] = -1
     else:
         community_renaming_dict[i] = counter
         counter += 1
 
 # %%
-new_df.community = new_df.community.replace(community_renaming_dict)
+community_annotated_raw_df.community.replace(community_renaming_dict, inplace=True)
 
 # %%
-new_df.community.value_counts()
+community_annotated_raw_df.community.value_counts()
 
 # %%
-new_df.to_excel('out/FR_Questionnaire_communities.xlsx')
-
-# %%
-saved_partition = partition
+community_annotated_raw_df.to_excel("out/FR_Questionnaire_communities.xlsx")
 
 # %% [markdown]
-# ## Analyse communities
+# ## Analysis of the communities
 
 # %% [markdown]
 # ### Outliers
 
 # %%
 for isolated in list_communities[list_communities == 1].index:
-    individual = df[df_communities['community'] == isolated]
-    print(f'Individual {individual.index[0] + 2}')
+    individual = df[communities_data.community == isolated]
+    # NOTE: We add +2 to the index so that to match the row number in spreadsheet viewing software.
+    print(f"Individual {individual.index[0] + 2}")
 
 # %% [markdown]
 # ### Main communities
 
 # %%
-df_main_communities = df_communities.query("community != -1").dropna()
-df_main_communities.community.replace(community_renaming_dict, inplace=True)
+df_main_communities = (
+    communities_data.replace(community_renaming_dict).query("community != 1").dropna()
+)
+
+# %% [markdown]
+# We build an interpretable classifier that aims to predict the community based on the survey responses.
 
 # %%
-X, y = shuffle(df_main_communities.drop(columns='community'), df_main_communities['community'], 
-               random_state=0)
+X, y = shuffle(
+    df_main_communities.drop(columns="community"),
+    df_main_communities.community,
+    random_state=0,
+)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+
+# %%
+baseline = max(df_main_communities.community.value_counts() / len(df_main_communities))
+print(f"Random baseline: {baseline}")
 
 # %%
 clf = LinearDiscriminantAnalysis()
@@ -432,47 +474,46 @@ print(clf.score(X_test, y_test))
 best_param = clf.C_.mean()
 
 # %%
-community_size = []
-for i in range(3):
-    community_size.append(np.sum((df_main_communities['community'] == i)))
-print('Random baseline:', np.max(community_size)/len(df_main_communities))
-
-# %%
-X, y = df_main_communities.drop(columns='community'), df_main_communities['community']
+X, y = df_main_communities.drop(columns="community"), df_main_communities["community"]
 
 clf = LinearDiscriminantAnalysis()
 clf.fit_transform(X, y)
-persona = clf.decision_function(df_main_communities.drop(columns='community'))
+persona = clf.decision_function(df_main_communities.drop(columns="community"))
 
 # %%
-X, y = df_main_communities.drop(columns='community'), df_main_communities['community']
+X, y = df_main_communities.drop(columns="community"), df_main_communities["community"]
 
 clf = LogisticRegression(C=best_param)
 clf.fit(X, y)
-persona = clf.decision_function(df_main_communities.drop(columns='community'))
+persona = clf.decision_function(df_main_communities.drop(columns="community"))
 
 # %%
-d = clf.decision_function(X)
-probabilities = np.exp(d) / np.sum(np.exp(d))
+decisions = clf.decision_function(X)
+probabilities = np.exp(decisions) / np.sum(np.exp(decisions))
 
 # %% [markdown]
-# Most important features
+# Display most important features and typical representatives
 
 # %%
+TOP_K = 10
+
 for i, community in enumerate(clf.classes_):
+    # Find the "typical representative" of the community: the one with the highest score.
+    # NOTE: We add +2 to the index so that to match the row number in spreadsheet viewing software.
     idx = X.iloc[np.argmax(np.abs(probabilities[:, i]))].name + 2
     if i == -1:
-        print(f'Typical outlier (-1): {idx}')
+        print(f"Typical outlier (-1): {idx}")
     else:
-        print(f'Typical individual for community {community}: {idx}')
-        
-    for top_question in reversed(np.argsort(np.abs(clf.coef_[i,:]))[-10:]):
-        print('   Question:', X.columns[top_question])
-        print('   Effect size:', clf.coef_[i,:][top_question])
+        print(f"Typical individual for community {community}: {idx}")
+
+    # Show top k features for this community.
+    for top_question in reversed(np.argsort(np.abs(clf.coef_[i, :]))[-TOP_K:]):
+        print("   Question:", X.columns[top_question])
+        print("   Effect size:", clf.coef_[i, :][top_question])
         print()
 
 # %% [markdown]
-# Community demographics
+# Make a spreadsheet with community demographics.
 
 # %%
 data = df_communities.copy()
@@ -495,6 +536,3 @@ for i, community in enumerate(list(clf.classes_) + ["Total"]):
     if i == 0:
         print(",".join(demographics.keys()))
     print(",".join([str(v) for v in demographics.values()]))
-
-# %%
-lifestyle_df.profession.unique()
