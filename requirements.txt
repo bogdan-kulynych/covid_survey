@@ -3,7 +3,7 @@ attr==0.3.1
 attrs==19.3.0
 backcall==0.1.0
 black==19.10b0
-bleach==3.1.4
+bleach==3.3.0
 click==7.1.1
 cycler==0.10.0
 Cython==0.29.16
